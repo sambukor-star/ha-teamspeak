@@ -1,0 +1,35 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "TeamSpeak Server",
+                "description": "Verbindungsdaten für den ServerQuery-Zugriff auf deinen TeamSpeak-3-Server.",
+                "data": {
+                    "host": "Host (IP oder Domainname des TS-Servers)",
+                    "port": "ServerQuery-Port (Standard: 10011)",
+                    "username": "ServerQuery-Benutzername",
+                    "password": "ServerQuery-Passwort",
+                    "sid": "Virtuelle Server-ID (Standard: 1)",
+                    "interval": "Abfrageintervall in Sekunden (Standard: 30)"
+                }
+            },
+            "reauth_confirm": {
+                "title": "TeamSpeak-Zugangsdaten bestätigen",
+                "description": "Das ServerQuery-Passwort für {host} ist nicht mehr gültig. Bitte neu eingeben.",
+                "data": {
+                    "password": "ServerQuery-Passwort"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Verbindung fehlgeschlagen",
+            "invalid_auth": "Ungültige ServerQuery-Zugangsdaten",
+            "unknown": "Unerwarteter Fehler",
+            "invalid_interval": "Abfrageintervall muss mindestens 2 Sekunden betragen"
+        },
+        "abort": {
+            "already_configured": "Dieser TeamSpeak-Server ist bereits eingerichtet",
+            "reauth_successful": "Zugangsdaten erfolgreich aktualisiert"
+        }
+    }
+}

@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Umgebung / lokale Konfiguration
+.env
+tests/.env
+.ha/
+
+# OS
+Thumbs.db
+.DS_Store
