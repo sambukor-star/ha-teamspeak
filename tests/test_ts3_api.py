@@ -33,6 +33,8 @@ class FakeTS3Server:
     def __init__(self) -> None:
         self.server = None
         self.port: int | None = None
+        self.clientinfo_calls = 0
+        self.flags_supported = True
 
     async def start(self) -> None:
         self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
@@ -59,6 +61,8 @@ class FakeTS3Server:
                 if not raw:
                     break
                 cmd = raw.decode("utf-8", "replace").strip()
+                if cmd.startswith("clientinfo"):
+                    self.clientinfo_calls += 1
                 writer.write(self._answer(cmd).encode("utf-8"))
                 await writer.drain()
                 if cmd == "quit":
@@ -97,6 +101,25 @@ class FakeTS3Server:
             return (
                 "clid=7 cid=1 client_type=0 client_nickname=Max\\sMustermann"
                 "|clid=8 cid=3 client_type=1 client_nickname=query\\suser\r\n"
+                "error id=0 msg=ok\r\n"
+            )
+        if cmd.startswith("clientlist"):
+            if not self.flags_supported:
+                return "error id=256 msg=unknown command\r\n"
+            return (
+                "clid=21 cid=1 client_type=0 client_nickname=Alpha "
+                "client_away=0 client_input_muted=0 client_output_muted=0 "
+                "client_idle_time=1500 client_servergroups=6,13 "
+                "client_platform=Windows client_version=3.6.2 client_country=DE"
+                "|clid=22 cid=2 client_type=0 client_nickname=Be\\sTräger "
+                "client_away=1 client_input_muted=1 client_output_muted=0 "
+                "client_idle_time=90000 client_servergroups=7 "
+                "client_platform=Linux client_version=3.6.1 client_country=AT"
+                "|clid=23 cid=2 client_type=0 client_nickname=Charlie "
+                "client_away=0 client_input_muted=0 client_output_muted=1 "
+                "client_idle_time=200 client_servergroups= "
+                "client_platform=macOS client_version=3.6.1 client_country=CH"
+                "|clid=24 cid=1 client_type=1 client_nickname=serverquery\r\n"
                 "error id=0 msg=ok\r\n"
             )
         if cmd.startswith("clientinfo"):
@@ -153,6 +176,107 @@ async def main() -> None:
         await client.close()
     finally:
         await fake.stop()
+
+    # Fake-Server: erweitertes clientlist mit Flags (neuer Coordinator-Pfad)
+    fake = FakeTS3Server()
+    await fake.start()
+    try:
+        client = TeamSpeakServerQuery("127.0.0.1", port=fake.port, timeout=5)
+        await client.connect()
+        await client.login("homeassistant", "secret")
+        await client.use_server(1)
+        enriched = await client.clientlist(
+            "-away -voice -times -groups -info -country"
+        )
+        assert len(enriched) == 4
+        alpha, be, charlie, query_row = enriched
+        assert alpha["client_nickname"] == "Alpha"
+        assert alpha["client_servergroups"] == "6,13"
+        assert be["client_nickname"] == "Be Träger"
+        assert be["client_idle_time"] == "90000"
+        assert be["client_away"] == "1"
+        assert be["client_input_muted"] == "1"
+        assert be["client_platform"] == "Linux"
+        assert charlie["client_output_muted"] == "1"
+        assert charlie["client_servergroups"] == ""
+        assert query_row["client_type"] == "1"
+        await client.close()
+    finally:
+        await fake.stop()
+
+    # Fake-Server: Server kennt die clientlist-Flags nicht -> saubere
+    # Fehlermeldung (id bleibt unbekannt), kein Verbindungsabbruch, damit der
+    # Coordinator auf clientlist + clientinfo zurückfallen kann.
+    fake = FakeTS3Server()
+    fake.flags_supported = False
+    await fake.start()
+    try:
+        client = TeamSpeakServerQuery("127.0.0.1", port=fake.port, timeout=5)
+        await client.connect()
+        await client.login("homeassistant", "secret")
+        try:
+            await client.clientlist("-away -voice -times -groups -info -country")
+        except TS3Error as err:
+            assert "256" in str(err), str(err)
+        else:
+            raise AssertionError("TS3Error für unbekannte clientlist-Flags erwartet")
+        plain = await client.clientlist()
+        assert len(plain) == 2
+        await client.close()
+    finally:
+        await fake.stop()
+
+    # Coordinator-Zusammenführung (nur wenn homeassistant installiert ist)
+    try:
+        import homeassistant  # noqa: F401
+    except ImportError:
+        print("homeassistant nicht installiert -> Coordinator-Tests übersprungen.")
+    else:
+        sys.path.insert(0, str(ROOT))
+        from custom_components.teamspeak.coordinator import _build_client_data
+
+        raw = {
+            "clid": "22",
+            "cid": "2",
+            "client_nickname": "Be Träger",
+            "client_type": "0",
+            "client_away": "1",
+            "client_input_muted": "1",
+            "client_output_muted": "0",
+            "client_idle_time": "90000",
+            "client_servergroups": "7",
+            "client_platform": "Linux",
+            "client_version": "3.6.1",
+            "client_country": "AT",
+        }
+        data = _build_client_data("22", raw, {}, {"2": "Lobby"})
+        assert data.name == "Be Träger"
+        assert data.channel_name == "Lobby"
+        assert data.away is True
+        assert data.idle_time == 90.0
+        assert data.input_muted is True
+        assert data.output_muted is False
+        assert data.platform == "Linux"
+        assert data.version == "3.6.1"
+        assert data.country == "AT"
+        assert data.servergroups == [7]
+
+        # Rückfallpfad: Werte kommen bevorzugt aus clientinfo
+        detail = {
+            "client_nickname": "Aus Detail",
+            "connection_ping": "25.5",
+            "connection_ping_deviation": "3.5",
+            "client_idle_time": "4200",
+            "client_servergroups": "6,7,13",
+        }
+        raw_plain = {"clid": "7", "cid": "1", "client_type": "0"}
+        data2 = _build_client_data("7", raw_plain, detail, {"1": "Standard Kanal"})
+        assert data2.name == "Aus Detail"
+        assert data2.ping == 25.5
+        assert data2.ping_deviation == 3.5
+        assert data2.idle_time == 4.2
+        assert data2.servergroups == [6, 7, 13]
+        assert data2.channel_name == "Standard Kanal"
 
     # Fake-Server: fehlerhafte Zugangsdaten
     fake = FakeTS3Server()

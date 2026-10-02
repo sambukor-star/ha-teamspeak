@@ -328,9 +328,15 @@ class TeamSpeakServerQuery:
         """Liefert ``channellist`` des gewählten virtuellen Servers."""
         return await self._send_command("channellist")
 
-    async def clientlist(self) -> list[dict[str, Any]]:
-        """Liefert ``clientlist`` des gewählten virtuellen Servers."""
-        return await self._send_command("clientlist")
+    async def clientlist(self, flags: str | None = None) -> list[dict[str, Any]]:
+        """Liefert ``clientlist`` des gewählten virtuellen Servers.
+
+        Mit ``flags`` (z. B. ``"-away -voice -times -groups -info -country"``)
+        liefert der Server die Zusatzfelder direkt mit, sodass keine
+        einzelnen ``clientinfo``-Abfragen pro Client nötig sind.
+        """
+        command = f"clientlist {flags}" if flags else "clientlist"
+        return await self._send_command(command)
 
     async def clientinfo(self, clid: str) -> dict[str, Any]:
         """Liefert ``clientinfo`` für einen bestimmten Client."""

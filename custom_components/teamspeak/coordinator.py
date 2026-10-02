@@ -14,7 +14,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .api import TS3AuthError, TS3Error, TeamSpeakClientData, TeamSpeakServerQuery
-from .const import DEFAULT_SCAN_INTERVAL
+from .const import CLIENTLIST_FLAGS, DEFAULT_SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -67,7 +67,24 @@ class TeamSpeakCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             serverinfo = await client.serverinfo()
             channels = await client.channellist()
-            clientlist = await client.clientlist()
+
+            # Clients inkl. Zusatzfelder (Idle, Away, Mute, Gruppen, Plattform,
+            # Version, Land) in EINEM clientlist-Befehl abfragen. Früher wurde
+            # pro Client ein einzelnes clientinfo gesendet; ab ~6 Clients
+            # überschritt das das Kommandobudget des TS-Flood-Schutzes
+            # (Standard ~10 Befehle pro Zeitfenster) -> der Server trennte die
+            # Query-Verbindung und der Sensor fiel auf "Nicht verfügbar"/None.
+            detail_available = True
+            try:
+                raw_clients = await client.clientlist(CLIENTLIST_FLAGS)
+            except TS3Error as err:
+                _LOGGER.debug(
+                    "clientlist mit Flags nicht möglich (%s); Rückfall auf "
+                    "clientlist + clientinfo pro Client",
+                    err,
+                )
+                detail_available = False
+                raw_clients = await client.clientlist()
 
             channel_names = {
                 str(ch.get("cid")): str(ch.get("channel_name") or "")
@@ -75,16 +92,18 @@ class TeamSpeakCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             }
 
             clients: list[dict[str, Any]] = []
-            for raw in clientlist:
+            for raw in raw_clients:
                 if str(raw.get("client_type", "0")) == "1":
                     # ServerQuery-Clients (Typ 1) nicht mitzählen.
                     continue
                 clid = str(raw.get("clid"))
-                try:
-                    detail = await client.clientinfo(clid)
-                except TS3Error:
-                    _LOGGER.debug("clientinfo für clid=%s fehlgeschlagen", clid)
-                    detail = {}
+                detail: dict[str, Any] = {}
+                if not detail_available:
+                    try:
+                        detail = await client.clientinfo(clid)
+                    except TS3Error:
+                        _LOGGER.debug("clientinfo für clid=%s fehlgeschlagen", clid)
+                        detail = {}
                 data = _build_client_data(clid, raw, detail, channel_names)
                 clients.append(data.as_dict())
 
@@ -106,23 +125,38 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _combined(detail: dict[str, Any], raw: dict[str, Any], key: str) -> Any:
+    """Wert bevorzugt aus clientinfo, sonst aus der (erweiterten) clientlist."""
+    value = detail.get(key)
+    return raw.get(key) if value is None else value
+
+
+def _parse_servergroups(value: Any) -> list[int]:
+    """Wandelt ``"6,7,13"`` in eine Liste von Gruppen-IDs um."""
+    groups: list[int] = []
+    for part in str(value or "").split(","):
+        part = part.strip()
+        if part:
+            try:
+                groups.append(int(part))
+            except ValueError:
+                pass
+    return groups
+
+
 def _build_client_data(
     clid: str,
     raw: dict[str, Any],
     detail: dict[str, Any],
     channel_names: dict[str, str],
 ) -> TeamSpeakClientData:
-    """Führt clientlist- und clientinfo-Daten eines Clients zusammen."""
-    idle_ms = _to_float(detail.get("client_idle_time"))
-    servergroups: list[int] = []
-    for part in str(detail.get("client_servergroups", "") or "").split(","):
-        part = part.strip()
-        if part:
-            try:
-                servergroups.append(int(part))
-            except ValueError:
-                pass
+    """Führt clientlist- und (sofern vorhanden) clientinfo-Daten zusammen.
 
+    Läuft die Abfrage über ``clientlist`` mit Zusatz-Flags (siehe
+    ``CLIENTLIST_FLAGS``), stecken alle Felder bereits in ``raw`` und
+    ``detail`` bleibt leer. Sonst stammen die Werte aus dem clientinfo.
+    """
+    idle_ms = _to_float(_combined(detail, raw, "client_idle_time"))
     return TeamSpeakClientData(
         clid=clid,
         cid=str(raw.get("cid") or detail.get("cid") or ""),
@@ -132,11 +166,13 @@ def _build_client_data(
         ping=_to_float(detail.get("connection_ping")),
         ping_deviation=_to_float(detail.get("connection_ping_deviation")),
         idle_time=idle_ms / 1000.0 if idle_ms is not None else None,
-        away=str(detail.get("client_away", "0")) == "1",
-        input_muted=str(detail.get("client_input_muted", "0")) == "1",
-        output_muted=str(detail.get("client_output_muted", "0")) == "1",
-        platform=str(detail.get("client_platform") or "") or None,
-        version=str(detail.get("client_version") or "") or None,
-        country=str(detail.get("client_country") or "") or None,
-        servergroups=servergroups,
+        away=str(_combined(detail, raw, "client_away") or "0") == "1",
+        input_muted=str(_combined(detail, raw, "client_input_muted") or "0") == "1",
+        output_muted=str(_combined(detail, raw, "client_output_muted") or "0") == "1",
+        platform=str(_combined(detail, raw, "client_platform") or "") or None,
+        version=str(_combined(detail, raw, "client_version") or "") or None,
+        country=str(_combined(detail, raw, "client_country") or "") or None,
+        servergroups=_parse_servergroups(
+            _combined(detail, raw, "client_servergroups")
+        ),
     )
